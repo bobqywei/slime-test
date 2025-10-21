@@ -72,6 +72,8 @@ def create_placement_groups(args):
     """Create placement groups for actor and rollout engines."""
 
     num_gpus = 0
+    student_offset = None
+
     if args.debug_train_only:
         num_gpus = args.actor_num_nodes * args.actor_num_gpus_per_node
         rollout_offset = 0
@@ -95,6 +97,12 @@ def create_placement_groups(args):
             critic_offset = args.actor_num_nodes * args.actor_num_gpus_per_node
             rollout_offset += args.critic_num_nodes * args.critic_num_gpus_per_node
 
+    # Add student inference pool GPUs if using separate pool for meta-learning
+    if getattr(args, 'use_meta_learning', False) and not getattr(args, 'use_shared_inference_pool', True):
+        student_offset = num_gpus
+        num_gpus += args.student_num_gpus
+        print(f"Meta-learning: Adding {args.student_num_gpus} GPUs for separate student inference pool")
+
     print(f"Creating placement group with {num_gpus} GPUs...")
     pg, actor_pg_reordered_bundle_indices = _create_placement_group(num_gpus)
 
@@ -102,11 +110,22 @@ def create_placement_groups(args):
     if args.use_critic:
         critic_pg_reordered_bundle_indices = actor_pg_reordered_bundle_indices[critic_offset:]
 
-    return {
+    # Student inference pool placement group (separate from teacher/rollout)
+    student_pg_reordered_bundle_indices = None
+    if student_offset is not None:
+        student_pg_reordered_bundle_indices = actor_pg_reordered_bundle_indices[student_offset:]
+
+    result = {
         "actor": (pg, actor_pg_reordered_bundle_indices),
         "critic": (pg, critic_pg_reordered_bundle_indices) if args.use_critic else None,
         "rollout": (pg, rollout_pg_reordered_bundle_indices),
     }
+
+    # Add student placement group if using separate pool
+    if student_pg_reordered_bundle_indices is not None:
+        result["student"] = (pg, student_pg_reordered_bundle_indices)
+
+    return result
 
 
 def allocate_train_group(args, num_nodes, num_gpus_per_node, pg, wandb_run_id):
@@ -170,11 +189,34 @@ def create_training_models(args, pgs, rollout_manager, wandb_run_id):
     return actor_model, critic_model
 
 
-def create_rollout_manager(args, pg, wandb_run_id):
-    rollout_manager = RolloutManager.options(
+def create_rollout_manager(args, pg, wandb_run_id, pgs=None):
+    """Create rollout manager.
+
+    Args:
+        args: Arguments
+        pg: Placement group for teacher/rollout engines
+        wandb_run_id: WandB run ID
+        pgs: Full placement groups dict (needed for meta-learning with separate student pool)
+
+    Returns:
+        tuple: (rollout_manager, num_rollout_per_epoch)
+    """
+    # Choose rollout manager class based on meta-learning flag
+    if getattr(args, "use_meta_learning", False):
+        from slime.meta_learning.rollout_manager import MetaLearningRolloutManager
+
+        rollout_manager_class = MetaLearningRolloutManager
+    else:
+        rollout_manager_class = RolloutManager
+
+    # For meta-learning with separate student pool, pass full pgs dict
+    # Otherwise just pass the rollout pg
+    pg_to_pass = pgs if (pgs and getattr(args, "use_meta_learning", False)) else pg
+
+    rollout_manager = rollout_manager_class.options(
         num_cpus=1,
         num_gpus=0,
-    ).remote(args, pg, wandb_run_id=wandb_run_id)
+    ).remote(args, pg_to_pass, wandb_run_id=wandb_run_id)
 
     # calculate num_rollout from num_epoch
     num_rollout_per_epoch = None

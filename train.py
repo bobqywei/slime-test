@@ -13,7 +13,9 @@ def train(args):
 
     # create the rollout manager, with sglang engines inside.
     # need to initialize rollout manager first to calculate num_rollout
-    rollout_manager, num_rollout_per_epoch = create_rollout_manager(args, pgs["rollout"], wandb_run_id=wandb_run_id)
+    rollout_manager, num_rollout_per_epoch = create_rollout_manager(
+        args, pgs["rollout"], wandb_run_id=wandb_run_id, pgs=pgs
+    )
 
     # create the actor and critic models
     actor_model, critic_model = create_training_models(args, pgs, rollout_manager, wandb_run_id=wandb_run_id)
@@ -34,7 +36,11 @@ def train(args):
         if args.eval_interval is not None and rollout_id == 0:
             ray.get(rollout_manager.eval.remote(rollout_id))
 
-        rollout_data_ref = ray.get(rollout_manager.generate.remote(rollout_id))
+        # Generate rollouts (with inner loop if meta-learning enabled)
+        if args.use_meta_learning:
+            rollout_data_ref = ray.get(rollout_manager.generate_with_inner_loop.remote(rollout_id))
+        else:
+            rollout_data_ref = ray.get(rollout_manager.generate.remote(rollout_id))
 
         if args.offload:
             ray.get(rollout_manager.offload.remote())

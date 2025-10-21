@@ -18,6 +18,8 @@ class Sample:
     response: str = ""
     response_length: int = 0
     label: Optional[str] = None
+    rubric: Optional[str] = None
+    grader_cot: Optional[str] = None
     reward: Optional[Union[float, dict[str, Any]]] = None
     loss_mask: Optional[list[int]] = None
     weight_versions: list[str] = field(default_factory=list)
@@ -62,3 +64,39 @@ class ParamInfo:
 # In Megatron backend, several fields are converted to torch.Tensor lists on GPU
 # before being consumed by data iterators (see megatron_utils.actor._get_rollout_data).
 RolloutBatch = dict[str, list[torch.Tensor] | list[int] | list[float] | list[str]]
+
+
+@dataclass
+class ProblemsContext:
+    """Extended context for a single training example in the meta-learning setting"""
+
+    # Original problem data
+    problems: list[Sample] = field(default_factory=list)  # Original prompt, label, etc.
+
+    # Teacher-generated additional prompt information of shape [num_inner_steps]
+    # TODO(bob): consider storing diffs instead
+    additional_info_per_inner_step: list[str] = field(default_factory=list)
+
+    # Generator rollouts (collected during inner loop) of shape [num_problems, num_inner_steps]
+    problem_rollouts_dict: dict[int, list[Sample]] = field(default_factory=dict)
+
+    # Holdout problems for evaluation
+    heldout_problems: list[Sample] = field(default_factory=list)
+
+    def to_dict(self):
+        return {
+            "problems": [p.to_dict() for p in self.problems],
+            "additional_info": self.additional_info,
+            "problem_rollouts": {k: [r.to_dict() for r in v] for k, v in self.problem_rollouts_dict.items()},
+        }
+
+    @staticmethod
+    def from_dict(data: dict):
+        return ProblemsContext(
+            problems=[Sample.from_dict(p) for p in data["problems"]],
+            additional_info=data["additional_info"],
+            problem_rollouts_dict={
+                int(k): [Sample.from_dict(r) for r in rollouts]
+                for k, rollouts in data["problem_rollouts"].items()
+            },
+        )

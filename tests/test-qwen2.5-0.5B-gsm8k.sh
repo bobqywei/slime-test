@@ -1,14 +1,14 @@
 #!/bin/bash
 
 # for rerun the task
-pkill -9 sglang
-sleep 3
-ray stop --force
-pkill -9 ray
-pkill -9 python
-sleep 3
-pkill -9 ray
-pkill -9 python
+# pkill -9 sglang
+# sleep 3
+# ray stop --force
+# pkill -9 ray
+# pkill -9 python
+# sleep 3
+# pkill -9 ray
+# pkill -9 python
 
 set -ex
 
@@ -23,8 +23,8 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
 source "${SCRIPT_DIR}/../scripts/models/qwen2.5-0.5B.sh"
 
 CKPT_ARGS=(
-   --hf-checkpoint /root/Qwen2.5-0.5B-Instruct/
-   --ref-load /root/Qwen2.5-0.5B-Instruct_torch_dist/
+   --hf-checkpoint /data/Qwen2-0.5B-Instruct/
+   --ref-load /data/Qwen2-0.5B-Instruct-mt/
 )
 
 ROLLOUT_ARGS=(
@@ -109,7 +109,7 @@ MISC_ARGS=(
 )
 
 # launch the master node of ray in container
-ray start --head --node-ip-address ${MASTER_ADDR} --num-gpus 4 --disable-usage-stats
+# ray start --head --node-ip-address ${MASTER_ADDR} --num-gpus 4 --disable-usage-stats
 
 ray job submit --address="http://127.0.0.1:8265" \
    --runtime-env-json='{
@@ -118,7 +118,7 @@ ray job submit --address="http://127.0.0.1:8265" \
         "CUDA_DEVICE_MAX_CONNECTIONS": "1"
      }
    }' \
-   -- python3 train.py \
+   -- python3 /data/slime/train.py \
    --actor-num-nodes 1 \
    --actor-num-gpus-per-node 4 \
    --colocate \
@@ -127,7 +127,6 @@ ray job submit --address="http://127.0.0.1:8265" \
    ${ROLLOUT_ARGS[@]} \
    ${OPTIMIZER_ARGS[@]} \
    ${GRPO_ARGS[@]} \
-   ${WANDB_ARGS[@]} \
    ${PERF_ARGS[@]} \
    ${EVAL_ARGS[@]} \
    ${SGLANG_ARGS[@]} \

@@ -35,7 +35,16 @@ class RolloutManager:
     def __init__(self, args, pg, wandb_run_id):
         self.args = args
         self.pg = pg
-        _start_router(args)
+
+        # Start teacher/rollout router
+        if args.sglang_router_ip is None or args.sglang_router_port is None:
+            args.sglang_router_ip, args.sglang_router_port = _start_router(
+                args,
+                router_ip=args.sglang_router_ip,
+                router_port=args.sglang_router_port,
+                router_name="Teacher/Rollout"
+            )
+
         # TODO make args immutable
         init_wandb_secondary(
             args, wandb_run_id, router_addr=f"http://{args.sglang_router_ip}:{args.sglang_router_port}"
@@ -380,14 +389,22 @@ def _allocate_rollout_engine_addr_and_ports_normal(*, args, num_engines, rollout
     return addr_and_ports
 
 
-def _start_router(args):
-    """start sgl router and slime router"""
-    if args.sglang_router_ip is not None:
-        return
+def _start_router(args, router_ip=None, router_port=None, router_name="Teacher"):
+    """Start sgl router or slime router.
 
-    args.sglang_router_ip = get_host_info()[1]
-    if args.sglang_router_port is None:
-        args.sglang_router_port = find_available_port(random.randint(3000, 4000))
+    Args:
+        args: Arguments object
+        router_ip: Router IP (if None, will be auto-assigned)
+        router_port: Router port (if None, will be auto-assigned)
+        router_name: Name for logging (e.g., "Teacher", "Student")
+
+    Returns:
+        tuple: (router_ip, router_port) of the started router
+    """
+    if router_ip is None:
+        router_ip = get_host_info()[1]
+    if router_port is None:
+        router_port = find_available_port(random.randint(3000, 4000))
 
     if args.use_slime_router:
         from slime.router.router import run_router
@@ -400,8 +417,8 @@ def _start_router(args):
         from slime.utils.http_utils import run_router
 
         router_args = RouterArgs(
-            host=args.sglang_router_ip,
-            port=args.sglang_router_port,
+            host=router_ip,
+            port=router_port,
             balance_abs_threshold=0,
             prometheus_port=find_available_port(random.randint(4000, 5000)),
         )
@@ -421,7 +438,9 @@ def _start_router(args):
     # Wait 3 seconds
     time.sleep(3)
     assert process.is_alive()
-    print(f"Router launched at {args.sglang_router_ip}:{args.sglang_router_port}")
+    print(f"{router_name} router launched at {router_ip}:{router_port}")
+
+    return router_ip, router_port
 
 
 def _log_eval_rollout_data(rollout_id, args, data):

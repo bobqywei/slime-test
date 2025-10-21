@@ -849,6 +849,143 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
             parser.add_argument("--use-distributed-post", action="store_true", default=False)
             return parser
 
+        def add_meta_learning_arguments(parser):
+            parser.add_argument(
+                "--use-meta-learning",
+                action="store_true",
+                default=False,
+                help="Enable meta-learning teacher with inner optimization loop",
+            )
+            parser.add_argument(
+                "--num-inner-iterations",
+                type=int,
+                default=3,
+                help="Number of inner loop iterations for meta-learning",
+            )
+            parser.add_argument(
+                "--heldout-ipb",
+                type=int,
+                default=None,
+                help="Number of heldout problems per batch for inner loop evaluation"
+            )
+            parser.add_argument(
+                "--grader-port",
+                type=int,
+                default=None,
+                help="Port for grader model server (defaults to router port)",
+            )
+            parser.add_argument(
+                "--grader-temperature",
+                type=float,
+                default=0.0,
+                help="Temperature for grader model (usually greedy)",
+            )
+            parser.add_argument(
+                "--grader-max-tokens",
+                type=int,
+                default=512,
+                help="Max tokens for grader response",
+            )
+            parser.add_argument(
+                "--grader-concurrency",
+                type=int,
+                default=32,
+                help="Concurrent grader requests",
+            )
+            parser.add_argument(
+                "--teacher-temperature",
+                type=float,
+                default=0.7,
+                help="Temperature for teacher model",
+            )
+            parser.add_argument(
+                "--teacher-max-tokens",
+                type=int,
+                default=512,
+                help="Max tokens for teacher's additional info",
+            )
+            parser.add_argument(
+                "--teacher-concurrency",
+                type=int,
+                default=16,
+                help="Concurrent teacher requests",
+            )
+            parser.add_argument(
+                "--rubric-key",
+                type=str,
+                default="rubric",
+                help="Key in dataset for problem-specific rubrics",
+            )
+            parser.add_argument(
+                "--additional-info-position",
+                type=str,
+                choices=["prefix", "suffix", "system"],
+                default="suffix",
+                help="Where to inject additional info in generator prompt",
+            )
+
+            parser.add_argument(
+                "--openai-api-key",
+                type=str,
+                default=None,
+                help="OpenAI API key for grader models etc.",
+            )
+
+            # Student/Generator model configuration
+            parser.add_argument(
+                "--student-num-gpus",
+                type=int,
+                default=None,
+                help=(
+                    "Number of GPUs for student/generator inference pool. "
+                    "If None, shares the same inference pool as teacher (rollout_num_gpus). "
+                    "Set this to create a separate student-only inference pool."
+                ),
+            )
+            parser.add_argument(
+                "--student-num-gpus-per-engine",
+                type=int,
+                default=None,
+                help=(
+                    "Number of GPUs per student inference engine (like tp_size). "
+                    "Defaults to rollout_num_gpus_per_engine if not specified."
+                ),
+            )
+            parser.add_argument(
+                "--student-checkpoint",
+                type=str,
+                default=None,
+                help=(
+                    "Checkpoint path for student/generator model. "
+                    "If None, uses hf_checkpoint (same as teacher)."
+                ),
+            )
+            parser.add_argument(
+                "--student-router-port",
+                type=int,
+                default=None,
+                help=(
+                    "Port for student inference router. "
+                    "If None, shares the same router as teacher (sglang_router_port)."
+                ),
+            )
+            parser.add_argument(
+                "--student-router-ip",
+                type=str,
+                default=None,
+                help=(
+                    "IP for student inference router. "
+                    "If None, shares the same router as teacher (sglang_router_ip)."
+                ),
+            )
+            parser.add_argument(
+                "--n-problems-per-prompt",
+                type=int,
+                default=2,
+                help="Number of problems per prompt group in inner loop",
+            )
+            return parser
+
         def add_reward_model_arguments(parser):
             parser.add_argument(
                 "--rm-type",
@@ -1004,6 +1141,7 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
         parser = add_network_arguments(parser)
         parser = add_reward_model_arguments(parser)
         parser = add_rollout_buffer_arguments(parser)
+        parser = add_meta_learning_arguments(parser)
         parser = add_ci_arguments(parser)
         parser.set_defaults(sglang_tensor_parallel_size=add_sglang_tp_size())
 
@@ -1137,6 +1275,38 @@ def slime_validate_args(args):
             "require advantage normalization. Please add `--normalize-advantages` to your command."
         )
 
+    # Meta-learning validation
+    if args.use_meta_learning:
+        assert args.num_inner_iterations > 0, "num_inner_iterations must be positive"
+
+        # Student/Generator inference pool configuration
+        if args.student_num_gpus is None:
+            # Share the same inference pool as teacher
+            args.student_num_gpus = args.rollout_num_gpus
+            args.use_shared_inference_pool = True
+        else:
+            # Separate student inference pool
+            args.use_shared_inference_pool = False
+            assert args.student_num_gpus > 0, "student_num_gpus must be positive"
+
+        if args.student_num_gpus_per_engine is None:
+            args.student_num_gpus_per_engine = args.rollout_num_gpus_per_engine
+
+        if args.student_checkpoint is None:
+            args.student_checkpoint = args.hf_checkpoint
+
+        # Student router configuration
+        if args.student_router_ip is None:
+            args.student_router_ip = args.sglang_router_ip
+        if args.student_router_port is None:
+            if args.use_shared_inference_pool:
+                # Share the same router as teacher
+                args.student_router_port = args.sglang_router_port
+            else:
+                # Need a separate router for student
+                # Will be allocated dynamically in placement_group.py
+                pass
+
     if args.use_dynamic_batch_size:
         assert args.max_tokens_per_gpu is not None, "max_tokens_per_gpu must be set when use_dynamic_batch_size is set"
         if args.log_probs_max_tokens_per_gpu is None:
@@ -1207,10 +1377,16 @@ def slime_validate_args(args):
             )
         args.global_batch_size = global_batch_size
 
-    assert args.rollout_batch_size * args.n_samples_per_prompt % args.global_batch_size == 0, (
-        f"rollout_batch_size {args.rollout_batch_size} * n_samples_per_prompt {args.n_samples_per_prompt} "
-        f"is not a multiple of global_batch_size {args.global_batch_size}"
-    )
+    if args.use_meta_learning:
+        assert int(args.rollout_batch_size - args.heldout_ipb) * args.n_samples_per_prompt % args.global_batch_size == 0, (
+            f"rollout_batch_size {args.rollout_batch_size} * heldout_ipb {args.heldout_ipb} "
+            f"* n_samples_per_prompt {args.n_samples_per_prompt} is not a multiple of global_batch_size {args.global_batch_size}"
+        )
+    else:
+        assert args.rollout_batch_size * args.n_samples_per_prompt % args.global_batch_size == 0, (
+            f"rollout_batch_size {args.rollout_batch_size} * n_samples_per_prompt {args.n_samples_per_prompt} "
+            f"is not a multiple of global_batch_size {args.global_batch_size}"
+        )
 
     if args.n_samples_per_prompt == 1:
         args.grpo_std_normalization = False
